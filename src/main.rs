@@ -72,6 +72,13 @@ struct DeskApp {
     edit_task_open: bool,
     edit_task_draft: String,
     edit_task_need_focus: bool,
+    pomo_log_more: bool,
+    review_open: bool,
+    review_index: usize,
+    review_started_ms: u64,
+    review_score: u8,
+    review_text: String,
+    review_need_focus: bool,
 }
 
 impl DeskApp {
@@ -136,6 +143,13 @@ impl DeskApp {
             edit_task_open: false,
             edit_task_draft: String::new(),
             edit_task_need_focus: false,
+            pomo_log_more: false,
+            review_open: false,
+            review_index: 0,
+            review_started_ms: 0,
+            review_score: 0,
+            review_text: String::new(),
+            review_need_focus: false,
         }
     }
 
@@ -564,42 +578,87 @@ impl DeskApp {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 ui.label(RichText::new(format!("已完成 {done} 个番茄")).size(11.0).color(MUTED));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let label = if self.pomo_log_open { "收起记录" } else { "记录" };
-                    if ghost_button(ui, label, self.pomo_log_open).clicked() {
-                        self.pomo_log_open = !self.pomo_log_open;
-                    }
-                });
+                let label = if self.pomo_log_open { "收起记录" } else { "记录" };
+                let reserve = if self.pomo_log_open { 84.0 } else { 52.0 };
+                ui.add_space((ui.available_width() - reserve).max(0.0));
+                if ghost_button(ui, label, self.pomo_log_open).clicked() {
+                    self.pomo_log_open = !self.pomo_log_open;
+                }
             });
             if self.pomo_log_open {
                 ui.add_space(4.0);
-                let rows: Vec<_> = self.pomo.history(now).into_iter().rev().take(40).collect();
-                if rows.is_empty() {
-                    ui.label(RichText::new("还没有番茄记录").size(12.0).color(MUTED));
+                let mut closed: Vec<_> = self.pomo.notes().iter().cloned().enumerate().collect();
+                closed.reverse();
+                let total = closed.len();
+                if total == 0 {
+                    ui.label(RichText::new("还没有完成的番茄").size(12.0).color(MUTED));
                 }
-                for row in rows {
-                    let task = if row.task.is_empty() { "未填写" } else { row.task.as_str() };
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(note_span(row.started_ms, row.ended_ms))
-                                .size(12.0)
-                                .color(MUTED),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let visible = if self.pomo_log_more { total } else { total.min(3) };
+                let mut open_review = None;
+                for (index, note) in closed.into_iter().take(visible) {
+                    let task = if note.task.is_empty() {
+                        "未填写".to_string()
+                    } else {
+                        note.task.clone()
+                    };
+                    let score = note.score;
+                    let status = note.status();
+                    let block = ui.scope(|ui| {
+                        ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(row.status.label())
+                                RichText::new(note_span(note.started_ms, Some(note.ended_ms)))
                                     .size(12.0)
-                                    .color(status_color(row.status)),
+                                    .color(MUTED),
                             );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if let Some(score) = score {
+                                    ui.label(RichText::new(format!("{score} 分")).size(12.0).color(GOLD));
+                                } else {
+                                    ui.label(RichText::new("评价").size(12.0).color(MUTED));
+                                }
+                                ui.label(RichText::new(status.label()).size(12.0).color(status_color(status)));
+                            });
                         });
+                        ui.label(
+                            RichText::new(format!("{task}  ·  {}", note_spent(note.secs)))
+                                .size(12.0)
+                                .color(CREAM),
+                        );
                     });
-                    ui.label(
-                        RichText::new(format!("{task}  ·  {}", note_spent(row.secs)))
-                            .size(12.0)
-                            .color(CREAM),
-                    );
+                    let hit = ui
+                        .interact(
+                            block.response.rect,
+                            block.response.id.with("hit"),
+                            Sense::click(),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand);
+                    if hit.clicked() {
+                        open_review = Some((index, note.started_ms, note.score.unwrap_or(0), note.review));
+                    }
                     ui.add_space(6.0);
+                }
+                if let Some((index, started_ms, score, review)) = open_review {
+                    self.review_index = index;
+                    self.review_started_ms = started_ms;
+                    self.review_score = score;
+                    self.review_text = review;
+                    self.review_need_focus = true;
+                    self.review_open = true;
+                    self.new_focus_open = false;
+                    self.edit_task_open = false;
+                }
+                let hidden = total.saturating_sub(3);
+                if hidden > 0 {
+                    let more_label = if self.pomo_log_more {
+                        "收起".to_string()
+                    } else {
+                        format!("更多 {hidden}")
+                    };
+                    if ghost_button(ui, &more_label, self.pomo_log_more).clicked() {
+                        self.pomo_log_more = !self.pomo_log_more;
+                    }
                 }
             }
         });
@@ -980,6 +1039,111 @@ impl DeskApp {
             self.edit_task_open = false;
         }
     }
+
+    fn show_review(&mut self, ctx: &egui::Context) {
+        let summary = self.pomo.notes().get(self.review_index).and_then(|note| {
+            if note.started_ms != self.review_started_ms {
+                return None;
+            }
+            let task = if note.task.is_empty() {
+                "未填写".to_string()
+            } else {
+                note.task.clone()
+            };
+            Some((
+                task,
+                note_span(note.started_ms, Some(note.ended_ms)),
+                note_spent(note.secs),
+            ))
+        });
+        let Some((task, span, spent)) = summary else {
+            self.review_open = false;
+            return;
+        };
+        let mut save = false;
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::new("pomo-review"))
+            .backdrop_color(Color32::from_black_alpha(160))
+            .frame(
+                Frame::new()
+                    .fill(CARD)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .inner_margin(Margin::same(16))
+                    .corner_radius(12),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(240.0);
+                ui.label(RichText::new("自我评价").size(16.0).strong().color(CREAM));
+                ui.add_space(4.0);
+                ui.label(RichText::new(task).size(14.0).color(CREAM));
+                ui.label(RichText::new(format!("{span}    {spent}")).size(12.0).color(MUTED));
+                ui.add_space(8.0);
+                ui.label(RichText::new("打分").size(12.0).color(MUTED));
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for score in 1..=5 {
+                        if score_button(ui, score, self.review_score >= score).clicked() {
+                            self.review_score = score;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("一句评价").size(12.0).color(MUTED));
+                ui.add_space(2.0);
+                let editor = ui.scope(|ui| {
+                    ui.visuals_mut().weak_text_color = Some(MUTED);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.review_text)
+                            .hint_text("这一轮怎么样")
+                            .desired_width(f32::INFINITY)
+                            .text_color(CREAM)
+                            .background_color(BG)
+                            .frame(
+                                Frame::new()
+                                    .fill(BG)
+                                    .stroke(Stroke::new(1.0, GOLD))
+                                    .inner_margin(Margin::symmetric(8, 6))
+                                    .corner_radius(8),
+                            ),
+                    )
+                });
+                if self.review_need_focus {
+                    editor.inner.request_focus();
+                    self.review_need_focus = false;
+                }
+                if editor.inner.lost_focus()
+                    && ui.input(|input| input.key_pressed(Key::Enter))
+                    && (1..=5).contains(&self.review_score)
+                {
+                    save = true;
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ghost_button(ui, "取消", false).clicked() {
+                        close = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let ready = (1..=5).contains(&self.review_score);
+                        if ghost_button(ui, "保存", ready).clicked() && ready {
+                            save = true;
+                        }
+                    });
+                });
+            });
+        if response.should_close() {
+            close = true;
+        }
+        if save {
+            self.pomo
+                .set_review(self.review_index, self.review_started_ms, self.review_score, &self.review_text);
+            self.review_text.clear();
+            self.review_open = false;
+        } else if close {
+            self.review_text.clear();
+            self.review_open = false;
+        }
+    }
 }
 
 impl eframe::App for DeskApp {
@@ -1035,6 +1199,9 @@ impl eframe::App for DeskApp {
         }
         if self.edit_task_open {
             self.show_edit_task(ui.ctx());
+        }
+        if self.review_open {
+            self.show_review(ui.ctx());
         }
         self.sync_opacity(ui.ctx());
     }
@@ -1465,6 +1632,22 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: BarIcon, color: Color32
             painter.line_segment([tail + side, tail - side], stroke);
         }
     }
+}
+
+fn score_button(ui: &mut egui::Ui, score: u8, on: bool) -> egui::Response {
+    let fill = if on {
+        Color32::from_rgb(72, 54, 28)
+    } else {
+        Color32::from_rgb(46, 39, 32)
+    };
+    let color = if on { GOLD } else { MUTED };
+    ui.add(
+        Button::new(RichText::new(score.to_string()).size(13.0).color(color))
+            .fill(fill)
+            .stroke(Stroke::NONE)
+            .corner_radius(8u8)
+            .min_size(Vec2::new(28.0, 28.0)),
+    )
 }
 
 fn ghost_button(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {

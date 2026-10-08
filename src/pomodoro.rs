@@ -97,6 +97,10 @@ pub struct FocusNote {
     pub secs: u64,
     /// 计时走完为 true，中途停下为 false。
     pub finished: bool,
+    /// 自我评价，1 到 5。没打分是 None。
+    pub score: Option<u8>,
+    /// 一句评语。
+    pub review: String,
 }
 
 impl FocusNote {
@@ -165,6 +169,22 @@ impl Pomodoro {
     /// 只改当前这一轮的任务描述，不碰计时。
     pub fn set_task(&mut self, task: &str) {
         self.task = task.trim().to_string();
+    }
+
+    /// 给已经结束的某一条补上自我评价。分数只能是 1 到 5。
+    pub fn set_review(&mut self, index: usize, started_ms: u64, score: u8, comment: &str) -> bool {
+        if !(1..=5).contains(&score) {
+            return false;
+        }
+        let Some(note) = self.log.get_mut(index) else {
+            return false;
+        };
+        if note.started_ms != started_ms {
+            return false;
+        }
+        note.score = Some(score);
+        note.review = comment.trim().to_string();
+        true
     }
 
     pub fn notes(&self) -> &[FocusNote] {
@@ -368,6 +388,8 @@ impl Pomodoro {
                     "secs": note.secs,
                     "done": note.finished,
                     "status": note.status().as_key(),
+                    "score": note.score,
+                    "review": note.review,
                 })
             })
             .collect();
@@ -390,6 +412,13 @@ impl Pomodoro {
                     ended_ms: item.get("ended")?.as_u64()?,
                     secs: item.get("secs")?.as_u64()?,
                     finished: stored_finished(item)?,
+                    score: stored_score(item),
+                    review: item
+                        .get("review")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
                 })
             })
             .collect();
@@ -427,6 +456,8 @@ impl Pomodoro {
             ended_ms: ended,
             secs,
             finished,
+            score: None,
+            review: String::new(),
         });
         if self.log.len() > 200 {
             let extra = self.log.len() - 200;
@@ -435,6 +466,12 @@ impl Pomodoro {
         self.task.clear();
         self.focus_begun = None;
     }
+}
+
+fn stored_score(item: &serde_json::Value) -> Option<u8> {
+    let score = item.get("score")?.as_u64()?;
+    let score = u8::try_from(score).ok()?;
+    (1..=5).contains(&score).then_some(score)
 }
 
 fn stored_finished(item: &serde_json::Value) -> Option<bool> {
@@ -702,6 +739,28 @@ mod tests {
         );
         assert_eq!(pomo.notes()[0].status(), NoteStatus::Done);
         assert_eq!(pomo.notes()[1].status(), NoteStatus::Interrupted);
+        assert_eq!(pomo.notes()[0].score, None);
+        assert!(pomo.notes()[0].review.is_empty());
+    }
+
+    #[test]
+    fn review_roundtrips_on_the_finished_note() {
+        let mut pomo = Pomodoro::new();
+        let start = at(1_700_000_000);
+        pomo.task_mut().push_str("写周报");
+        pomo.toggle(start);
+        assert_eq!(pomo.settle(start + FOCUS), 1);
+        assert!(pomo.set_review(0, millis(start), 4, "  还行  "));
+        assert_eq!(pomo.notes()[0].score, Some(4));
+        assert_eq!(pomo.notes()[0].review, "还行");
+        assert!(!pomo.set_review(0, millis(start), 0, "不行"));
+        assert!(!pomo.set_review(0, 1, 5, "错条"));
+        assert_eq!(pomo.notes()[0].score, Some(4));
+        let raw = pomo.save_log();
+        let mut loaded = Pomodoro::new();
+        loaded.load_log(&raw);
+        assert_eq!(loaded.notes()[0].score, Some(4));
+        assert_eq!(loaded.notes()[0].review, "还行");
     }
 
     #[test]
