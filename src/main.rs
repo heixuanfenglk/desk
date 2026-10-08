@@ -69,6 +69,9 @@ struct DeskApp {
     new_focus_open: bool,
     new_focus_draft: String,
     new_focus_need_focus: bool,
+    edit_task_open: bool,
+    edit_task_draft: String,
+    edit_task_need_focus: bool,
 }
 
 impl DeskApp {
@@ -130,6 +133,9 @@ impl DeskApp {
             new_focus_open: false,
             new_focus_draft: String::new(),
             new_focus_need_focus: false,
+            edit_task_open: false,
+            edit_task_draft: String::new(),
+            edit_task_need_focus: false,
         }
     }
 
@@ -340,6 +346,9 @@ impl DeskApp {
         if icon_button(&mut tools, BarIcon::Unfold, true, "展开").clicked() {
             self.expand_pinned();
         }
+        if alarm_ringing() && ghost_button(&mut tools, "停止", true).clicked() {
+            stop_alarm();
+        }
         let btc = self.feed.btc_usd.map(|price| {
             let pct = self
                 .feed
@@ -355,6 +364,17 @@ impl DeskApp {
             )
         });
         let summary = ui.horizontal(|ui| {
+            let task = self.pomo.task();
+            if !task.is_empty() {
+                ui.scope(|ui| {
+                    ui.set_max_width(148.0);
+                    ui.add(
+                        egui::Label::new(RichText::new(task).size(13.0).strong().color(GOLD))
+                            .truncate(),
+                    );
+                });
+                ui.add_space(8.0);
+            }
             if let Some((text, pct)) = btc {
                 ui.label(RichText::new(text).size(12.0).color(CREAM));
                 if let Some(pct) = pct {
@@ -463,17 +483,63 @@ impl DeskApp {
                     );
                 });
             });
-            ui.add_space(2.0);
+            ui.add_space(6.0);
+            let task_owned = self.pomo.task().to_string();
+            let mut edit_task = false;
+            Frame::new()
+                .fill(BG)
+                .stroke(Stroke::new(
+                    1.0,
+                    if task_owned.is_empty() { LINE } else { GOLD },
+                ))
+                .inner_margin(Margin::symmetric(8, 2))
+                .corner_radius(8)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let text_width = (ui.available_width() - 28.0).max(40.0);
+                        let (text, color) = if task_owned.is_empty() {
+                            ("填写任务描述", MUTED)
+                        } else {
+                            (task_owned.as_str(), GOLD)
+                        };
+                        ui.scope(|ui| {
+                            ui.set_min_width(text_width);
+                            ui.set_max_width(text_width);
+                            if ui
+                                .add(
+                                    egui::Label::new(RichText::new(text).size(16.0).strong().color(color))
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                )
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                edit_task = true;
+                            }
+                        });
+                        if icon_button(ui, BarIcon::Edit, false, "修改任务").clicked() {
+                            edit_task = true;
+                        }
+                    });
+                });
+            if edit_task {
+                self.edit_task_draft = task_owned;
+                self.edit_task_need_focus = true;
+                self.edit_task_open = true;
+                self.new_focus_open = false;
+            }
+            ui.add_space(8.0);
             ui.label(RichText::new(remaining).size(40.0).strong().color(CREAM));
             ui.add_space(4.0);
             progress_bar(ui, progress);
-            if !self.pomo.task().is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new(self.pomo.task()).size(13.0).color(CREAM));
-            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                if alarm_ringing() && ghost_button(ui, "停止", true).clicked() {
+                    stop_alarm();
+                }
                 if ghost_button(ui, "新建", false).clicked() {
                     self.new_focus_draft.clear();
                     self.new_focus_need_focus = true;
@@ -847,6 +913,73 @@ impl DeskApp {
             self.new_focus_open = false;
         }
     }
+
+    fn show_edit_task(&mut self, ctx: &egui::Context) {
+        let mut save = false;
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::new("edit-task"))
+            .backdrop_color(Color32::from_black_alpha(160))
+            .frame(
+                Frame::new()
+                    .fill(CARD)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .inner_margin(Margin::same(16))
+                    .corner_radius(12),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(240.0);
+                ui.label(RichText::new("修改任务").size(16.0).strong().color(CREAM));
+                ui.add_space(4.0);
+                ui.label(RichText::new("任务描述").size(12.0).color(MUTED));
+                ui.add_space(2.0);
+                let editor = ui.scope(|ui| {
+                    ui.visuals_mut().weak_text_color = Some(MUTED);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.edit_task_draft)
+                            .hint_text("这一轮要做什么")
+                            .desired_width(f32::INFINITY)
+                            .text_color(CREAM)
+                            .background_color(BG)
+                            .frame(
+                                Frame::new()
+                                    .fill(BG)
+                                    .stroke(Stroke::new(1.0, GOLD))
+                                    .inner_margin(Margin::symmetric(8, 6))
+                                    .corner_radius(8),
+                            ),
+                    )
+                });
+                if self.edit_task_need_focus {
+                    editor.inner.request_focus();
+                    self.edit_task_need_focus = false;
+                }
+                if editor.inner.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+                    save = true;
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ghost_button(ui, "取消", false).clicked() {
+                        close = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ghost_button(ui, "保存", true).clicked() {
+                            save = true;
+                        }
+                    });
+                });
+            });
+        if response.should_close() {
+            close = true;
+        }
+        if save {
+            self.pomo.set_task(&self.edit_task_draft);
+            self.edit_task_draft.clear();
+            self.edit_task_open = false;
+        } else if close {
+            self.edit_task_draft.clear();
+            self.edit_task_open = false;
+        }
+    }
 }
 
 impl eframe::App for DeskApp {
@@ -899,6 +1032,9 @@ impl eframe::App for DeskApp {
         panel.response.context_menu(|ui| self.menu(ui));
         if self.new_focus_open {
             self.show_new_focus(ui.ctx());
+        }
+        if self.edit_task_open {
+            self.show_edit_task(ui.ctx());
         }
         self.sync_opacity(ui.ctx());
     }
@@ -976,9 +1112,12 @@ unsafe extern "system" {
 const SND_ASYNC: u32 = 0x0001;
 const SND_NODEFAULT: u32 = 0x0002;
 const SND_LOOP: u32 = 0x0008;
+const SND_PURGE: u32 = 0x0040;
 const SND_FILENAME: u32 = 0x0002_0000;
 const ALARM_FOR: Duration = Duration::from_secs(60);
 static ALARM_GEN: AtomicU64 = AtomicU64::new(0);
+/// 正在响的那一次。0 表示没在响。
+static ALARM_LIVE: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 struct Point {
@@ -1067,17 +1206,31 @@ fn phase_color(phase: pomodoro::Phase) -> Color32 {
     }
 }
 
+fn alarm_ringing() -> bool {
+    ALARM_LIVE.load(Ordering::SeqCst) != 0
+}
+
+fn silence_alarm() {
+    unsafe {
+        PlaySoundW(std::ptr::null(), 0, SND_PURGE);
+    }
+}
+
 fn stop_alarm() {
     ALARM_GEN.fetch_add(1, Ordering::SeqCst);
-    unsafe {
-        PlaySoundW(std::ptr::null(), 0, 0);
-    }
+    ALARM_LIVE.store(0, Ordering::SeqCst);
+    silence_alarm();
 }
 
 /// 阶段到点后循环播放闹钟，满一分钟停下。
 fn alarm() {
     let ticket = ALARM_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    ALARM_LIVE.store(ticket, Ordering::SeqCst);
     std::thread::spawn(move || {
+        if ALARM_GEN.load(Ordering::SeqCst) != ticket {
+            let _ = ALARM_LIVE.compare_exchange(ticket, 0, Ordering::SeqCst, Ordering::SeqCst);
+            return;
+        }
         let started = Instant::now();
         if start_alarm_loop() {
             while started.elapsed() < ALARM_FOR {
@@ -1090,12 +1243,17 @@ fn alarm() {
                 .compare_exchange(ticket, ticket + 1, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                unsafe {
-                    PlaySoundW(std::ptr::null(), 0, 0);
-                }
+                let _ = ALARM_LIVE.compare_exchange(ticket, 0, Ordering::SeqCst, Ordering::SeqCst);
+                silence_alarm();
             }
         } else {
             synth_alarm(ticket, started);
+            if ALARM_GEN
+                .compare_exchange(ticket, ticket + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = ALARM_LIVE.compare_exchange(ticket, 0, Ordering::SeqCst, Ordering::SeqCst);
+            }
         }
     });
 }
@@ -1229,6 +1387,7 @@ enum BarIcon {
     Fold,
     Unfold,
     Close,
+    Edit,
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: BarIcon, on: bool, tip: &str) -> egui::Response {
@@ -1294,6 +1453,16 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: BarIcon, color: Color32
                 painter.circle_stroke(head, 3.0, Stroke::new(1.4, color));
             }
             painter.line_segment([head + Vec2::new(0.0, 2.8), c + Vec2::new(0.0, 6.2)], Stroke::new(1.4, color));
+        }
+        BarIcon::Edit => {
+            let tail = c + Vec2::new(-4.6, 3.4);
+            let neck = c + Vec2::new(2.2, -3.4);
+            let tip = c + Vec2::new(4.8, -5.0);
+            painter.line_segment([tail, neck], stroke);
+            let side = Vec2::new(-1.15, -1.15);
+            painter.line_segment([neck + side, tip], stroke);
+            painter.line_segment([neck - side, tip], stroke);
+            painter.line_segment([tail + side, tail - side], stroke);
         }
     }
 }

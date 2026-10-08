@@ -162,6 +162,11 @@ impl Pomodoro {
         &mut self.task
     }
 
+    /// 只改当前这一轮的任务描述，不碰计时。
+    pub fn set_task(&mut self, task: &str) {
+        self.task = task.trim().to_string();
+    }
+
     pub fn notes(&self) -> &[FocusNote] {
         &self.log
     }
@@ -697,6 +702,21 @@ mod tests {
         );
         assert_eq!(pomo.notes()[0].status(), NoteStatus::Done);
         assert_eq!(pomo.notes()[1].status(), NoteStatus::Interrupted);
+    }
+
+    #[test]
+    fn set_task_updates_the_open_focus_without_restarting() {
+        let mut pomo = Pomodoro::new();
+        let start = at(1_000);
+        pomo.start_new_focus(start, "旧描述");
+        let mid = start + Duration::from_secs(30);
+        pomo.set_task("  新描述  ");
+        assert_eq!(pomo.task(), "新描述");
+        assert!(pomo.running());
+        assert_eq!(pomo.remaining(mid), FOCUS - Duration::from_secs(30));
+        assert_eq!(pomo.history(mid)[0].task, "新描述");
+        assert_eq!(pomo.history(mid)[0].status, NoteStatus::Running);
+        assert!(pomo.notes().is_empty());
     }
 
     #[test]
