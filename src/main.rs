@@ -589,53 +589,68 @@ impl DeskApp {
             });
             if self.pomo_log_open {
                 ui.add_space(4.0);
-                let mut closed: Vec<_> = self.pomo.notes().iter().cloned().enumerate().collect();
-                closed.reverse();
-                let total = closed.len();
+                // 进行中的也列出来。时间走完就变成已完成，可以直接点开评价。
+                let history = self.pomo.history(now);
+                let mut rows: Vec<_> = history
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let stored = row.ended_ms.and_then(|_| self.pomo.notes().get(index));
+                        let score = stored.and_then(|note| note.score);
+                        let review = stored.map(|note| note.review.clone()).unwrap_or_default();
+                        let log_index = stored.map(|_| index);
+                        (log_index, score, review, row)
+                    })
+                    .collect();
+                rows.reverse();
+                let total = rows.len();
                 if total == 0 {
-                    ui.label(RichText::new("还没有完成的番茄").size(12.0).color(MUTED));
+                    ui.label(RichText::new("还没有番茄记录").size(12.0).color(MUTED));
                 }
                 let visible = if self.pomo_log_more { total } else { total.min(3) };
                 let mut open_review = None;
-                for (index, note) in closed.into_iter().take(visible) {
-                    let task = if note.task.is_empty() {
+                for (log_index, score, review, row) in rows.into_iter().take(visible) {
+                    let task = if row.task.is_empty() {
                         "未填写".to_string()
                     } else {
-                        note.task.clone()
+                        row.task.clone()
                     };
-                    let score = note.score;
-                    let status = note.status();
+                    let status = row.status;
                     let block = ui.scope(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(note_span(note.started_ms, Some(note.ended_ms)))
+                                RichText::new(note_span(row.started_ms, row.ended_ms))
                                     .size(12.0)
                                     .color(MUTED),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if let Some(score) = score {
-                                    ui.label(RichText::new(format!("{score} 分")).size(12.0).color(GOLD));
-                                } else {
-                                    ui.label(RichText::new("评价").size(12.0).color(MUTED));
+                                if log_index.is_some() {
+                                    if let Some(score) = score {
+                                        ui.label(RichText::new(format!("{score} 分")).size(12.0).color(GOLD));
+                                    } else {
+                                        ui.label(RichText::new("评价").size(12.0).color(MUTED));
+                                    }
                                 }
                                 ui.label(RichText::new(status.label()).size(12.0).color(status_color(status)));
                             });
                         });
                         ui.label(
-                            RichText::new(format!("{task}  ·  {}", note_spent(note.secs)))
+                            RichText::new(format!("{task}  ·  {}", note_spent(row.secs)))
                                 .size(12.0)
                                 .color(CREAM),
                         );
                     });
-                    let hit = ui
-                        .interact(
-                            block.response.rect,
-                            block.response.id.with("hit"),
-                            Sense::click(),
-                        )
-                        .on_hover_cursor(CursorIcon::PointingHand);
-                    if hit.clicked() {
-                        open_review = Some((index, note.started_ms, note.score.unwrap_or(0), note.review));
+                    if let Some(index) = log_index {
+                        let hit = ui
+                            .interact(
+                                block.response.rect,
+                                block.response.id.with("hit"),
+                                Sense::click(),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand);
+                        if hit.clicked() {
+                            open_review = Some((index, row.started_ms, score.unwrap_or(0), review));
+                        }
                     }
                     ui.add_space(6.0);
                 }
@@ -1149,8 +1164,12 @@ impl DeskApp {
 impl eframe::App for DeskApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.take_feed();
+        let logged = self.pomo.notes().len();
         if self.pomo.settle(SystemTime::now()) > 0 {
             alarm();
+            if self.pomo.notes().len() > logged {
+                self.pomo_log_open = true;
+            }
         }
         ctx.request_repaint_after(Duration::from_millis(250));
     }
